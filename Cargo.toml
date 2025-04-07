@@ -1,13 +1,18 @@
-# Cargo.toml
 [package]
 name = "fcitx5-fep-rust"
 version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-zbus = { version = "3", default-features = false, features = ["blocking", "serde"] }
+# zbus: blocking feature を削除し、tokio feature を追加
+zbus = { version = "3", default-features = false, features = ["tokio", "serde"] }
 serde = { version = "1", features = ["derive"] }
 zvariant = "3"
 zbus_macros = "3"
-# crossterm を追加
-crossterm = "0.27" # 最新バージョンを確認してください
+# crossterm: event-stream feature を追加
+crossterm = { version = "0.27", features = ["event-stream"] }
+# Tokio ランタイムと関連機能
+tokio = { version = "1", features = ["full"] } # "full" feature を使うか、必要な機能 (rt-multi-thread, macros, sync, io-util, time, signal) を個別に指定
+# Async stream utilities
+futures-util = "0.3"
+tokio-stream = "0.1" # zbus の stream や crossterm の EventStream を扱うため

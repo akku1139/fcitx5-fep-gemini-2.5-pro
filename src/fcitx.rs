@@ -1,20 +1,19 @@
 use crate::error::FepError;
-use crate::state::FcitxUpdate; // state.rs も後で調整が必要
+use crate::state::FcitxUpdate;
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::time::Duration;
-use zbus::blocking::{Connection, Proxy};
-use zbus::zvariant::{ObjectPath, OwnedValue, Type, Value};
-use zbus_macros::{proxy, DeserializeInto, Serialize}; // proxyマクロを追加
+// use std::convert::TryFrom; // 不要になる可能性
+// use std::time::Duration; // 不要になる
+use zbus::{Connection, Proxy}; // blocking を削除
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value}; // Owned* 型を使うことが多い
+use zbus_macros::{proxy, DeserializeInto, Serialize};
+use futures_util::{Stream, StreamExt}; // Stream と StreamExt をインポート
+use tokio_stream::wrappers::SignalStream; // SignalStream をインポート
 
-// Fcitx D-Bus 定数
+// --- 定数と Proxy 定義 (変更なし) ---
 const FCITX5_SERVICE: &str = "org.fcitx.Fcitx5";
 const FCITX5_IFACE_CONTROLLER: &str = "org.fcitx.Fcitx.Controller1";
 const FCITX5_IFACE_IC: &str = "org.fcitx.Fcitx.InputContext1";
 const FCITX5_PATH: &str = "/org/fcitx/Fcitx5";
-
-// --- D-Bus Proxy Definitions ---
-// zbus_macros::proxy を使ってインターフェースを定義すると便利
 
 #[proxy(
     interface = "org.fcitx.Fcitx.Controller1",
@@ -22,164 +21,197 @@ const FCITX5_PATH: &str = "/org/fcitx/Fcitx5";
     default_path = "/org/fcitx/Fcitx5"
 )]
 trait FcitxController {
-    /// CreateInputContext method
-    /// Returns the object path of the new input context and its capabilities.
-    fn create_input_context(
+    /// CreateInputContext method (async)
+    #[zbus(name = "CreateInputContext")] // 明示的に名前を指定
+    async fn create_input_context(
         &self,
-        args: &HashMap<&str, zbus::zvariant::Value<'_>>, // e.g., {"program": "my_app", "display": ":0"}
-    ) -> zbus::Result<(ObjectPath<'static>, u32)>;
+        args: &HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<(OwnedObjectPath, u32)>; // OwnedObjectPath を使用
 }
 
-// InputContext 用の Proxy も定義
 #[proxy(interface = "org.fcitx.Fcitx.InputContext1")]
 trait FcitxInputContext {
-    /// ProcessKeyEvent method
-    /// Returns true if the key event was handled by the input method.
-    fn process_key_event(
+    /// ProcessKeyEvent method (async)
+    #[zbus(name = "ProcessKeyEvent")]
+    async fn process_key_event(
         &self,
         keysym: u32,
         keycode: u32,
         state: u32,
         is_release: bool,
-        time: u32, // Usually 0 is fine
+        time: u32,
     ) -> zbus::Result<bool>;
 
-    /// FocusIn method
-    fn focus_in(&self) -> zbus::Result<()>;
+    /// FocusIn method (async)
+    #[zbus(name = "FocusIn")]
+    async fn focus_in(&self) -> zbus::Result<()>;
 
-    /// FocusOut method
-    fn focus_out(&self) -> zbus::Result<()>;
+    /// FocusOut method (async)
+    #[zbus(name = "FocusOut")]
+    async fn focus_out(&self) -> zbus::Result<()>;
 
-    /// Reset method
-    fn reset(&self) -> zbus::Result<()>;
+    /// Reset method (async)
+    #[zbus(name = "Reset")]
+    async fn reset(&self) -> zbus::Result<()>;
 
-    /// SetCursorRect method (example)
-    fn set_cursor_rect(&self, x: i32, y: i32, w: i32, h: i32) -> zbus::Result<()>;
+    /// SetCursorRect method (async, example)
+    #[zbus(name = "SetCursorRect")]
+    async fn set_cursor_rect(&self, x: i32, y: i32, w: i32, h: i32) -> zbus::Result<()>;
 
-    // --- Signals to listen for ---
+    // --- Signals ---
+    // receive_commit_string のようなメソッドで Stream を取得する
 
-    /// CommitString signal
+    /// CommitString signal receiver
     #[zbus(signal)]
-    fn commit_string(&self, str: String) -> zbus::Result<()>;
+    async fn commit_string(&self, str: String) -> zbus::Result<()>;
 
-    /// UpdateFormattedPreedit signal
-    /// Sends an array of (text_segment, format_type)
+    /// UpdateFormattedPreedit signal receiver
     #[zbus(signal)]
-    fn update_formatted_preedit(&self, text: Vec<FormattedText>, cursor_pos: i32) -> zbus::Result<()>;
+    async fn update_formatted_preedit(&self, text: Vec<FormattedText>, cursor_pos: i32) -> zbus::Result<()>;
 
     // DeleteSurroundingText signal (example)
     // #[zbus(signal)]
-    // fn delete_surrounding_text(&self, offset: i32, n_chars: u32) -> zbus::Result<()>;
+    // async fn delete_surrounding_text(&self, offset: i32, n_chars: u32) -> zbus::Result<()>;
 }
 
-/// Represents a segment of formatted preedit text.
-/// `zvariant::Type` と `serde::Deserialize` が必要
 #[derive(DeserializeInto, Type, Debug, Clone)]
 pub struct FormattedText {
     text: String,
-    format: i32, // Corresponds to FcitxFormattedPreeditFormat enum
+    format: i32,
 }
 
-
-// --- Fcitx Client Implementation ---
+// --- Fcitx Client Implementation (Async) ---
 
 pub struct FcitxClient<'a> {
-    connection: Connection,
-    // controller_proxy: FcitxControllerProxyBlocking<'a>, // Use generated proxy type
-    ic_proxy: Option<FcitxInputContextProxyBlocking<'a>>, // Proxy for the specific Input Context
-    ic_path: Option<ObjectPath<'static>>, // Store the path for signal matching
+    connection: Connection, // Async Connection
+    // controller_proxy: FcitxControllerProxy<'a>, // Async Proxy type
+    ic_proxy: Option<FcitxInputContextProxy<'a>>, // Async Proxy
+    ic_path: Option<OwnedObjectPath>, // Owned path
 }
 
+// We need a helper struct to hold the streams because the proxy reference cannot be held across awaits easily
+struct FcitxSignalStreams<'a> {
+     commit_stream: SignalStream<'a, String>,
+     preedit_stream: SignalStream<'a, (Vec<FormattedText>, i32)>,
+     // Add other signal streams if needed
+}
+
+
 impl<'a> FcitxClient<'a> {
-    /// Establishes a connection to the Fcitx5 daemon and creates an input context.
-    pub fn connect() -> Result<Self, FepError> {
-        println!("Connecting to Fcitx5 via D-Bus...");
-        let connection = Connection::session().map_err(|e| FepError::FcitxConnection(e.to_string()))?;
+    /// Establishes an async connection and creates an input context.
+    pub async fn connect() -> Result<Self, FepError> {
+        println!("Connecting to Fcitx5 via D-Bus (async)...");
+        let connection = Connection::session().await // await for async connection
+            .map_err(|e| FepError::FcitxConnection(e.to_string()))?;
         println!("D-Bus session connection established.");
 
-        // Create a proxy for the main controller
-        let controller_proxy = FcitxControllerProxyBlocking::new(&connection)
+        let controller_proxy = FcitxControllerProxy::new(&connection).await // await proxy creation
             .map_err(|e| FepError::FcitxConnection(format!("Failed to create controller proxy: {}", e)))?;
         println!("Fcitx controller proxy created.");
 
-        // Prepare arguments for CreateInputContext
-        // TODO: Get actual display if needed, handle errors better
         let mut args = HashMap::new();
-        args.insert("program", Value::from("fep-rust-example").into());
-        // args.insert("display", Value::from(std::env::var("DISPLAY").unwrap_or(":0".to_string())));
+        args.insert("program", Value::from("fep-rust-example-async").into());
 
-        println!("Calling CreateInputContext...");
-        let (ic_path, _ic_caps) = controller_proxy.create_input_context(&args)
+        println!("Calling CreateInputContext (async)...");
+        let (ic_path, _ic_caps) = controller_proxy.create_input_context(&args).await // await method call
             .map_err(|e| FepError::FcitxConnection(format!("Failed to create input context: {}", e)))?;
         println!("Input Context created at path: {}", ic_path);
 
-        // Create a proxy for the newly created Input Context
-        // We need to build the proxy manually here as the path is dynamic
-        let ic_proxy = Proxy::builder(&connection)
-            .interface(FCITX5_IFACE_IC)?
-            .path(ic_path.clone())?
-            .destination(FCITX5_SERVICE)?
-            .build_blocking() // Build the blocking proxy
+        // Create the async proxy for the Input Context
+        let ic_proxy = FcitxInputContextProxy::builder(&connection)
+            .path(ic_path.clone())? // Use clone of OwnedObjectPath
+            .build().await // await async build
             .map_err(|e| FepError::FcitxConnection(format!("Failed to create IC proxy: {}", e)))?;
         println!("Input context proxy created.");
 
         let mut client = FcitxClient {
             connection,
-            // controller_proxy,
             ic_proxy: Some(ic_proxy),
             ic_path: Some(ic_path),
         };
 
-        // Activate the input context
-        client.focus_in()?;
+        // Activate the input context (async)
+        client.focus_in().await?;
         println!("Input context focused.");
 
         Ok(client)
     }
 
-    /// Sends FocusIn signal to the input context.
-    pub fn focus_in(&mut self) -> Result<(), FepError> {
+    /// Returns a combined stream of relevant Fcitx updates (CommitString, UpdateFormattedPreedit).
+    pub async fn receive_updates(&self) -> Result<impl Stream<Item = Result<FcitxUpdate, FepError>> + '_, FepError> {
+        let proxy = self.ic_proxy.as_ref().ok_or_else(|| FepError::FcitxConnection("Input context proxy not available for signals".to_string()))?;
+
+        // Create streams for individual signals
+        let commit_signal_stream = proxy.receive_commit_string().await
+             .map_err(|e| FepError::FcitxConnection(format!("Failed to receive CommitString signal: {}", e)))?;
+        let preedit_signal_stream = proxy.receive_update_formatted_preedit().await
+             .map_err(|e| FepError::FcitxConnection(format!("Failed to receive UpdateFormattedPreedit signal: {}", e)))?;
+
+        // Map signal arguments to FcitxUpdate enum
+        let commit_stream = commit_signal_stream.map(|args_result| {
+             // The stream gives Result<SignalArgsType, zbus::Error>
+             // We need to map this to Result<FcitxUpdate, FepError>
+             args_result
+                 .map(|args| FcitxUpdate::CommitString(args.str)) // Access args by name defined in signal method
+                 .map_err(|e| FepError::FcitxConnection(format!("CommitString signal error: {}", e)))
+        });
+
+        let preedit_stream = preedit_signal_stream.map(|args_result| {
+             args_result.map(|args| {
+                 let preedit_str = args.text.into_iter().map(|s| s.text).collect::<String>();
+                 // TODO: Handle cursor_pos (args.cursor_pos)
+                 FcitxUpdate::UpdatePreedit(preedit_str)
+             })
+             .map_err(|e| FepError::FcitxConnection(format!("UpdateFormattedPreedit signal error: {}", e)))
+        });
+
+        // Merge the streams into one
+        // Use tokio_stream::StreamExt::merge
+        Ok(tokio_stream::StreamExt::merge(commit_stream, preedit_stream))
+    }
+
+
+    /// Sends FocusIn signal (async).
+    pub async fn focus_in(&mut self) -> Result<(), FepError> {
         if let Some(proxy) = self.ic_proxy.as_mut() {
-            proxy.focus_in().map_err(|e| FepError::FcitxConnection(format!("FocusIn failed: {}", e)))?;
+            proxy.focus_in().await.map_err(|e| FepError::FcitxConnection(format!("FocusIn failed: {}", e)))?;
         }
         Ok(())
     }
 
-     /// Sends FocusOut signal to the input context.
-    pub fn focus_out(&mut self) -> Result<(), FepError> {
+     /// Sends FocusOut signal (async).
+    pub async fn focus_out(&mut self) -> Result<(), FepError> {
         if let Some(proxy) = self.ic_proxy.as_mut() {
-            proxy.focus_out().map_err(|e| FepError::FcitxConnection(format!("FocusOut failed: {}", e)))?;
+            proxy.focus_out().await.map_err(|e| FepError::FcitxConnection(format!("FocusOut failed: {}", e)))?;
         }
         Ok(())
     }
 
-    /// Sends Reset signal to the input context.
-     pub fn reset(&mut self) -> Result<(), FepError> {
+    /// Sends Reset signal (async).
+     pub async fn reset(&mut self) -> Result<(), FepError> {
         if let Some(proxy) = self.ic_proxy.as_mut() {
-            proxy.reset().map_err(|e| FepError::FcitxConnection(format!("Reset failed: {}", e)))?;
+            proxy.reset().await.map_err(|e| FepError::FcitxConnection(format!("Reset failed: {}", e)))?;
         }
         Ok(())
     }
 
-    /// Sends a key event to Fcitx5 using provided keysym, keycode, and state.
-    pub fn forward_key_event(
+    /// Sends a key event to Fcitx5 (async).
+    pub async fn forward_key_event(
         &mut self,
         keysym: u32,
-        keycode: u32, // Usually a placeholder (0) is fine if keysym/state are correct
-        state: u32,   // Modifier state mask
-        is_release: bool, // Currently assuming false (press only)
+        keycode: u32,
+        state: u32,
+        is_release: bool,
     ) -> Result<bool, FepError> {
         let proxy = self.ic_proxy.as_mut().ok_or_else(|| FepError::FcitxConnection("Input context proxy not available".to_string()))?;
-
-        // Use the provided arguments directly
-        let time = 0; // Typically okay for Fcitx
+        let time = 0;
 
         println!(
-            "Forwarding key to Fcitx5: keysym=0x{:x}, keycode={}, state={}, release={}",
+            "Forwarding key to Fcitx5 (async): keysym=0x{:x}, keycode={}, state={}, release={}",
             keysym, keycode, state, is_release
         );
 
-        match proxy.process_key_event(keysym, keycode, state, is_release, time) {
+        match proxy.process_key_event(keysym, keycode, state, is_release, time).await { // await the async call
             Ok(handled) => {
                 println!("Fcitx handled key event: {}", handled);
                 Ok(handled)
@@ -191,83 +223,26 @@ impl<'a> FcitxClient<'a> {
         }
     }
 
-    /// Receives and processes pending D-Bus messages/signals.
-    /// This is a polling approach. An async approach with signal handlers would be better.
-    /// Returns Some(FcitxUpdate) if an update relevant to us was processed.
-    pub fn receive_update(&mut self) -> Result<Option<FcitxUpdate>, FepError> {
-        // Try to process any pending messages on the connection without blocking indefinitely.
-        // `try_receive_message_blocking` or `receive_message_with_timeout` could be used.
-        // `process_all_pending` is simpler but might block if handlers do work.
-        // Let's use a short timeout.
-        match self.connection.receive_message_with_timeout(Duration::from_millis(10)) {
-             // Process one message if available within the timeout
-            Ok(Some(message)) => {
-                // Check if it's a signal for our input context
-                if let (Some(interface), Some(member), Some(path)) = (message.interface(), message.member(), message.path()) {
-                     // Check if the signal is from the path of our IC proxy
-                    if self.ic_path.as_ref().map_or(false, |p| p == path) {
-                        // Check if the signal is one we care about from the IC interface
-                        if interface == FCITX5_IFACE_IC {
-                            match member.as_str() {
-                                "CommitString" => {
-                                    let (commit_str,): (String,) = message.body()?;
-                                    println!("Received CommitString signal: {}", commit_str);
-                                    return Ok(Some(FcitxUpdate::CommitString(commit_str)));
-                                }
-                                "UpdateFormattedPreedit" => {
-                                    let (segments, cursor_pos): (Vec<FormattedText>, i32) = message.body()?;
-                                    println!("Received UpdateFormattedPreedit signal: {:?}, cursor: {}", segments, cursor_pos);
-                                    // Convert FormattedText segments back into a simple string for now
-                                    let preedit_str = segments.into_iter().map(|s| s.text).collect::<String>();
-                                    // TODO: Handle cursor_pos and formatting properly in terminal.rs
-                                    return Ok(Some(FcitxUpdate::UpdatePreedit(preedit_str)));
-                                }
-                                // Handle other signals like DeleteSurroundingText if needed
-                                _ => {
-                                    // println!("Received other signal for our IC: {}.{}", interface, member);
-                                }
-                            }
-                        }
-                    } else {
-                         // println!("Received message for different path: {}", path);
-                    }
-                } else {
-                    // println!("Received non-signal message or message without interface/member/path");
-                }
-                // If we processed a message but it wasn't an update for us, return None
-                 Ok(None)
-            }
-            Ok(None) => {
-                 // Timeout expired, no message received
-                 Ok(None)
-            }
-            Err(zbus::Error::BlockingRecvTimeout(_)) => {
-                // Explicitly handle timeout error as Ok(None)
-                 Ok(None)
-            }
-            Err(e) => {
-                eprintln!("Error receiving D-Bus message: {}", e);
-                Err(FepError::FcitxConnection(format!("Failed to receive/process D-Bus message: {}", e)))
-            }
-        }
-
-    }
-
-    /// Closes the connection to Fcitx5.
-    pub fn disconnect(&mut self) {
-        println!("Disconnecting from Fcitx5...");
+    /// Disconnects (async cleanup if needed).
+    pub async fn disconnect(&mut self) {
+        println!("Disconnecting from Fcitx5 (async)...");
         if let Some(proxy) = self.ic_proxy.as_mut() {
-            if let Err(e) = proxy.focus_out() {
+            if let Err(e) = proxy.focus_out().await { // await focus_out
                 eprintln!("Error sending FocusOut on disconnect: {}", e);
             }
         }
-        // Proxies hold references to the connection, so dropping them is usually enough.
-        // The connection itself will be closed when FcitxClient is dropped.
         self.ic_proxy = None;
         self.ic_path = None;
         println!("Fcitx5 disconnected (connection will close on drop).");
     }
 }
 
-// Note: No need for manual Drop implementation if Connection handles closure on drop.
-// Make sure FcitxClient owns the Connection.
+// Implement Drop for async cleanup if necessary, though connection drop might suffice
+impl<'a> Drop for FcitxClient<'a> {
+    fn drop(&mut self) {
+        // Note: Drop cannot be async. If async cleanup is strictly required,
+        // it must be called explicitly before dropping (e.g., client.disconnect().await).
+        // For simple cases, dropping the connection might be enough.
+        println!("FcitxClient dropped.");
+    }
+}
