@@ -3,9 +3,10 @@
 /// Represents updates received from Fcitx5.
 #[derive(Debug, Clone)]
 pub enum FcitxUpdate {
-    UpdatePreedit(String), // The new preedit string
+    UpdatePreedit(String), // The new preedit string (potentially combined from formatted segments)
     CommitString(String),  // The string to be committed to the application
-    // Add other update types like cursor position, candidate list etc.
+    // TODO: Add other update types like cursor position, candidate list etc.
+    // TODO: Potentially use a richer type than String for preedit to keep formatting.
 }
 
 /// Holds the current state of the FEP.

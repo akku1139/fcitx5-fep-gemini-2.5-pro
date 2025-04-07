@@ -1,11 +1,13 @@
 [package]
 name = "fcitx5-fep-rust"
 version = "0.1.0"
-edition = "2018" # Explicitly using 2018 edition
+edition = "2018"
 
 [dependencies]
-# No external dependencies for now, as requested.
-# For a real implementation, you would likely need:
-# dbus = "0.9" # Or zbus = "3"
-# libc = "0.2"
-# atty = "0.2" # Optional: for checking if running in a TTY
+# zbus の blocking API と serde サポートを使用
+zbus = { version = "3", default-features = false, features = ["blocking", "serde"] }
+# Fcitx5 のデータ型に必要な zvariant と serde
+serde = { version = "1", features = ["derive"] }
+zvariant = "3"
+# InputContext の ObjectPath を扱うため
+zbus_macros = "3"
