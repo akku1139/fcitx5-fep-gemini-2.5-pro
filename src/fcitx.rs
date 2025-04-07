@@ -161,43 +161,21 @@ impl<'a> FcitxClient<'a> {
         Ok(())
     }
 
-
-    /// Sends a key event to Fcitx5.
-    /// NOTE: Mapping string input to keysym/keycode/state is complex and not fully implemented here.
-    pub fn forward_key_event(&mut self, key_input: &str) -> Result<bool, FepError> {
+    /// Sends a key event to Fcitx5 using provided keysym, keycode, and state.
+    pub fn forward_key_event(
+        &mut self,
+        keysym: u32,
+        keycode: u32, // Usually a placeholder (0) is fine if keysym/state are correct
+        state: u32,   // Modifier state mask
+        is_release: bool, // Currently assuming false (press only)
+    ) -> Result<bool, FepError> {
         let proxy = self.ic_proxy.as_mut().ok_or_else(|| FepError::FcitxConnection("Input context proxy not available".to_string()))?;
 
-        // --- VERY SIMPLIFIED key mapping ---
-        // A real implementation needs a robust mapping from terminal key events
-        // (including modifiers like Shift, Ctrl, Alt) to X11/Wayland keysyms, keycodes, and state masks.
-        // This often requires libraries or complex platform-specific code.
-        let (keysym, keycode, state) = match key_input {
-            // Example: Map 'a'
-            "a" => (0x0061, 38, 0), // keysym, keycode (example), state (no modifiers)
-            // Example: Map 'A' (Shift + a)
-            "A" => (0x0041, 38, 1), // keysym, keycode, state (ShiftMask = 1)
-             // Example: Map Enter
-            "\n" | "\r" | "Enter" => (0xff0d, 36, 0), // XK_Return
-             // Example: Map Backspace
-            "Backspace" => (0xff08, 22, 0), // XK_BackSpace
-            // Add more mappings as needed...
-            _ => {
-                // Basic printable ASCII mapping (highly inaccurate for non-US layouts)
-                if key_input.len() == 1 && key_input.chars().next().unwrap().is_ascii() {
-                    let c = key_input.chars().next().unwrap();
-                    // This is a HACK: using ASCII value as keysym, placeholder keycode/state
-                    (c as u32, 0, 0)
-                } else {
-                    println!("Warning: Unhandled key input for Fcitx: '{}'", key_input);
-                    return Ok(false); // Don't forward unhandled keys
-                }
-            }
-        };
-        let is_release = false; // Assuming key press only for now
+        // Use the provided arguments directly
         let time = 0; // Typically okay for Fcitx
 
         println!(
-            "Forwarding key to Fcitx5: keysym={}, keycode={}, state={}, release={}",
+            "Forwarding key to Fcitx5: keysym=0x{:x}, keycode={}, state={}, release={}",
             keysym, keycode, state, is_release
         );
 
