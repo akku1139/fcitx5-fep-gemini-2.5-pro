@@ -1,13 +1,13 @@
 # Cargo.toml
 [package]
 name = "fcitx5-fep-rust"
-version = "0.1.0"
+version = "0.1.1"
 # Rust Edition を 2021 に更新
 edition = "2021"
 
 [dependencies]
-# zbus: async (tokio) and serde support
-zbus = { version = "3", default-features = false, features = ["tokio", "serde"] }
+# zbus: async (tokio) support
+zbus = { version = "3", default-features = false, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 zvariant = "3"
 zbus_macros = "3"
