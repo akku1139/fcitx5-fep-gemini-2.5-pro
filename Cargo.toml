@@ -1,13 +1,13 @@
+# Cargo.toml
 [package]
 name = "fcitx5-fep-rust"
 version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-# zbus の blocking API と serde サポートを使用
 zbus = { version = "3", default-features = false, features = ["blocking", "serde"] }
-# Fcitx5 のデータ型に必要な zvariant と serde
 serde = { version = "1", features = ["derive"] }
 zvariant = "3"
-# InputContext の ObjectPath を扱うため
 zbus_macros = "3"
+# crossterm を追加
+crossterm = "0.27" # 最新バージョンを確認してください

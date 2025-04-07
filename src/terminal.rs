@@ -1,83 +1,101 @@
-// Handles interaction with the terminal (stdin/stdout).
-// NOTE: Real terminal FEPs require raw mode, cursor control, etc.
-// This is a simplified version using standard line-based I/O.
-// Implementing raw mode without external crates like 'termios' or 'crossterm'
-// requires platform-specific 'libc' calls and is complex.
-
 use crate::error::FepError;
-use crate::state::AppState;
-use std::io::{self, Write}; // Import Write trait
+use crate::state::AppState; // AppState を参照
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers}, // イベント関連を追加
+    execute, // execute! マクロ用
+    style::{Attribute, Print, SetAttribute}, // スタイル関連を追加
+    terminal::{self, Clear, ClearType}, // ターミナル制御関連を追加
+};
+use std::io::{self, Stdout, Write}; // Stdout と Write をインポート
+use std::time::Duration; // Duration を追加
 
 pub struct Terminal {
-    // In a real implementation, this would hold terminal state,
-    // like file descriptors or handles for raw mode.
-    // For now, it's empty as we use standard io.
+    stdout: Stdout, // 標準出力を保持
 }
 
 impl Terminal {
-    /// Creates a new Terminal handler.
-    /// In a real implementation, this would set up raw mode.
+    /// Creates a new Terminal handler and enters raw mode.
     pub fn new() -> Result<Self, FepError> {
-        // Placeholder for terminal setup (e.g., entering raw mode)
-        // if !atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout) {
-        //     return Err(FepError::TerminalSetup("Not running in a TTY".to_string()));
-        // }
-        // Real raw mode setup would go here using libc.
-        Ok(Terminal {})
+        let mut stdout = io::stdout();
+        terminal::enable_raw_mode()
+            .map_err(|e| FepError::TerminalSetup(format!("Failed to enable raw mode: {}", e)))?;
+        execute!(stdout, cursor::Hide) // カーソルを隠す (オプション)
+            .map_err(|e| FepError::TerminalSetup(format!("Failed to hide cursor: {}", e)))?;
+        Ok(Terminal { stdout })
     }
 
-    /// Reads a line of input from the terminal (stdin).
-    /// NOTE: This is blocking and line-buffered, not ideal for a real FEP.
-    pub fn read_input(&mut self) -> Result<Option<String>, FepError> {
-        let mut buffer = String::new();
-        match io::stdin().read_line(&mut buffer) {
-            Ok(0) => Ok(None), // EOF
-            Ok(_) => {
-                // Trim newline characters
-                buffer.pop(); // Remove \n
-                if buffer.ends_with('\r') {
-                    buffer.pop(); // Remove \r if present
+    /// Reads a key event from the terminal (stdin).
+    /// Uses polling to be non-blocking for a short duration.
+    /// Returns Ok(Some(KeyEvent)) if a key is pressed, Ok(None) if timeout occurs, Err on error.
+    pub fn read_input(&mut self) -> Result<Option<KeyEvent>, FepError> {
+        // Poll for events with a short timeout (e.g., 100ms)
+        // Adjust timeout as needed for responsiveness vs CPU usage trade-off.
+        if event::poll(Duration::from_millis(100))
+            .map_err(|e| FepError::Io(e))? {
+            // If an event is available, read it
+            match event::read().map_err(|e| FepError::Io(e))? {
+                Event::Key(key_event) => {
+                    // Handle Ctrl+C explicitly for exiting raw mode gracefully
+                    if key_event.code == KeyCode::Char('c')
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        Err(FepError::TerminalSetup("Ctrl+C pressed".to_string())) // Use a specific error or signal
+                    } else {
+                        Ok(Some(key_event))
+                    }
                 }
-                Ok(Some(buffer))
+                // Handle other events like Resize if necessary
+                _ => Ok(None), // Ignore non-key events for now
             }
-            Err(e) => Err(FepError::Io(e)),
+        } else {
+            // Timeout expired, no event
+            Ok(None)
         }
     }
 
-    /// Clears the current line and displays the application state (preedit, etc.).
-    /// NOTE: This is a very basic rendering implementation.
-    /// Real FEPs need precise cursor control (ANSI escape codes).
+    /// Clears the current line and displays the application state using crossterm.
     pub fn render(&mut self, state: &AppState) -> Result<(), FepError> {
-        // Simple rendering: clear line, show preedit, show commit buffer
-        // \r: Carriage return (move cursor to beginning of line)
-        // \x1B[K: Clear line from cursor to end
-        print!("\r\x1B[K"); // Clear the current line
+        execute!(
+            self.stdout,
+            // 1. Move cursor to the beginning of the line
+            cursor::MoveToColumn(0),
+            // 2. Clear the line from cursor to the end
+            Clear(ClearType::FromCursorDown), // Or ClearType::CurrentLine
+        )?;
 
-        // Display preedit string
+        // 3. Display the preedit string with underline
         if !state.preedit_string.is_empty() {
-            // In a real FEP, you'd add attributes (underline, colors) here
-            print!("[{}]", state.preedit_string);
-            // Need to position cursor correctly within or after preedit
+            execute!(
+                self.stdout,
+                SetAttribute(Attribute::Underlined),
+                Print(&state.preedit_string),
+                SetAttribute(Attribute::Reset) // Reset attributes
+            )?;
+            // TODO: Add cursor positioning within or after preedit based on Fcitx state
         }
 
-        // Display committed string immediately (can be buffered)
+        // 4. Display the commit string (directly output)
+        // In a real app, commit string is usually "typed" by the FEP,
+        // replacing the FEP's own display. Here we just print it after preedit.
         if !state.commit_string.is_empty() {
-            // Usually, the commit string is sent directly to the underlying
-            // application, not displayed by the FEP itself.
-            // Here we print it for demonstration.
-            print!("{}", state.commit_string);
+            // Ensure commit string starts on the same line if preedit was cleared
+            // or after the preedit if it exists. This logic might need refinement.
+            execute!(self.stdout, Print(&state.commit_string))?;
         }
 
-        // Ensure output is flushed
-        io::stdout().flush()?;
+        // 5. Flush output buffer
+        self.stdout.flush().map_err(FepError::Io)?;
+
         Ok(())
     }
 
-    /// Restores terminal settings on exit.
-    /// In a real implementation, this would disable raw mode.
-    pub fn cleanup(&mut self) {
-        // Placeholder for terminal cleanup (e.g., exiting raw mode)
-        println!("\nTerminal cleanup (placeholder)...");
+    /// Cleans up the terminal by disabling raw mode and showing the cursor.
+    fn cleanup(&mut self) {
+        // It's good practice to try cleaning up, even if errors occur.
+        let _ = execute!(self.stdout, cursor::Show); // Show cursor again
+        let _ = terminal::disable_raw_mode(); // Disable raw mode
+        println!("\nTerminal cleanup completed."); // Add newline after raw mode exit
     }
 }
 
