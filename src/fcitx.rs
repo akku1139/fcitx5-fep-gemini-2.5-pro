@@ -137,39 +137,35 @@ impl<'a> FcitxClient<'a> {
         Ok(client)
     }
 
-    /// Returns a combined stream of relevant Fcitx updates (CommitString, UpdateFormattedPreedit).
+    /// Returns a combined stream of relevant Fcitx updates.
     pub async fn receive_updates(&self) -> Result<impl Stream<Item = Result<FcitxUpdate, FepError>> + '_, FepError> {
         let proxy = self.ic_proxy.as_ref().ok_or_else(|| FepError::FcitxConnection("Input context proxy not available for signals".to_string()))?;
 
-        // Create streams for individual signals
         let commit_signal_stream = proxy.receive_commit_string().await
              .map_err(|e| FepError::FcitxConnection(format!("Failed to receive CommitString signal: {}", e)))?;
         let preedit_signal_stream = proxy.receive_update_formatted_preedit().await
              .map_err(|e| FepError::FcitxConnection(format!("Failed to receive UpdateFormattedPreedit signal: {}", e)))?;
 
-        // Map signal arguments to FcitxUpdate enum
         let commit_stream = commit_signal_stream.map(|args_result| {
-             // The stream gives Result<SignalArgsType, zbus::Error>
-             // We need to map this to Result<FcitxUpdate, FepError>
              args_result
-                 .map(|args| FcitxUpdate::CommitString(args.str)) // Access args by name defined in signal method
+                 .map(|args| FcitxUpdate::CommitString(args.str))
                  .map_err(|e| FepError::FcitxConnection(format!("CommitString signal error: {}", e)))
         });
 
         let preedit_stream = preedit_signal_stream.map(|args_result| {
              args_result.map(|args| {
-                 let preedit_str = args.text.into_iter().map(|s| s.text).collect::<String>();
-                 // TODO: Handle cursor_pos (args.cursor_pos)
-                 FcitxUpdate::UpdatePreedit(preedit_str)
+                 // args は (Vec<FormattedText>, i32) 型
+                 let text = args.text.into_iter().map(|s| s.text).collect::<String>();
+                 let cursor_pos = args.cursor_pos; // カーソル位置を取得
+                 println!("Raw Preedit Signal: text='{}', cursor_pos={}", text, cursor_pos);
+                 // 新しい FcitxUpdate::UpdatePreedit を使用
+                 FcitxUpdate::UpdatePreedit { text, cursor_pos }
              })
              .map_err(|e| FepError::FcitxConnection(format!("UpdateFormattedPreedit signal error: {}", e)))
         });
 
-        // Merge the streams into one
-        // Use tokio_stream::StreamExt::merge
         Ok(tokio_stream::StreamExt::merge(commit_stream, preedit_stream))
     }
-
 
     /// Sends FocusIn signal (async).
     pub async fn focus_in(&mut self) -> Result<(), FepError> {

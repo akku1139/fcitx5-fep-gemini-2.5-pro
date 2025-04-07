@@ -10,7 +10,6 @@ use tokio::select; // tokio::select! マクロ
 
 // --- keysyms と masks モジュール (変更なし) ---
 mod keysyms {
-    // ... (省略) ...
     pub const XK_BackSpace: u32 = 0xff08;
     pub const XK_Tab: u32 = 0xff09;
     pub const XK_Return: u32 = 0xff0d;
@@ -21,13 +20,56 @@ mod keysyms {
     pub const XK_Down: u32 = 0xff54;
     pub const XK_Delete: u32 = 0xffff;
     pub const XK_space: u32 = 0x0020;
+    pub const XK_exclam: u32 = 0x0021; // !
+    pub const XK_quotedbl: u32 = 0x0022; // "
+    pub const XK_numbersign: u32 = 0x0023; // #
+    pub const XK_dollar: u32 = 0x0024; // $
+    pub const XK_percent: u32 = 0x0025; // %
+    pub const XK_ampersand: u32 = 0x0026; // &
+    pub const XK_apostrophe: u32 = 0x0027; // '
+    pub const XK_parenleft: u32 = 0x0028; // (
+    pub const XK_parenright: u32 = 0x0029; // )
+    pub const XK_asterisk: u32 = 0x002a; // *
+    pub const XK_plus: u32 = 0x002b; // +
+    pub const XK_comma: u32 = 0x002c; // ,
+    pub const XK_minus: u32 = 0x002d; // -
+    pub const XK_period: u32 = 0x002e; // .
+    pub const XK_slash: u32 = 0x002f; // /
     pub const XK_0: u32 = 0x0030;
+    pub const XK_1: u32 = 0x0031;
+    pub const XK_2: u32 = 0x0032;
+    pub const XK_3: u32 = 0x0033;
+    pub const XK_4: u32 = 0x0034;
+    pub const XK_5: u32 = 0x0035;
+    pub const XK_6: u32 = 0x0036;
+    pub const XK_7: u32 = 0x0037;
+    pub const XK_8: u32 = 0x0038;
     pub const XK_9: u32 = 0x0039;
+    pub const XK_colon: u32 = 0x003a; // :
+    pub const XK_semicolon: u32 = 0x003b; // ;
+    pub const XK_less: u32 = 0x003c; // <
+    pub const XK_equal: u32 = 0x003d; // =
+    pub const XK_greater: u32 = 0x003e; // >
+    pub const XK_question: u32 = 0x003f; // ?
+    pub const XK_at: u32 = 0x0040; // @
     pub const XK_A: u32 = 0x0041;
+
     pub const XK_Z: u32 = 0x005a;
+    pub const XK_bracketleft: u32 = 0x005b; // [
+    pub const XK_backslash: u32 = 0x005c; // \
+    pub const XK_bracketright: u32 = 0x005d; // ]
+    pub const XK_asciicircum: u32 = 0x005e; // ^
+    pub const XK_underscore: u32 = 0x005f; // _
+    pub const XK_grave: u32 = 0x0060; // `
     pub const XK_a: u32 = 0x0061;
+
     pub const XK_z: u32 = 0x007a;
+    pub const XK_braceleft: u32 = 0x007b; // {
+    pub const XK_bar: u32 = 0x007c; // |
+    pub const XK_braceright: u32 = 0x007d; // }
+    pub const XK_asciitilde: u32 = 0x007e; // ~
 }
+
 mod masks {
     // ... (省略) ...
     pub const ShiftMask: u32 = 1 << 0;
@@ -40,10 +82,10 @@ mod masks {
     pub const Mod5Mask: u32 = 1 << 7;
 }
 
-/// Maps crossterm KeyEvent to Fcitx compatible (keysym, keycode, state). (変更なし)
+/// Maps crossterm KeyEvent to Fcitx compatible (keysym, keycode, state).
 fn map_key_event_to_fcitx(key_event: &KeyEvent) -> Option<(u32, u32, u32)> {
-    // ... (実装は省略 - 前回のコードと同じ) ...
     let mut state = 0u32;
+    // crossterm のモディファイアから X11 の state mask を生成
     if key_event.modifiers.contains(KeyModifiers::SHIFT) {
         state |= masks::ShiftMask;
     }
@@ -53,9 +95,53 @@ fn map_key_event_to_fcitx(key_event: &KeyEvent) -> Option<(u32, u32, u32)> {
     if key_event.modifiers.contains(KeyModifiers::ALT) {
         state |= masks::Mod1Mask;
     }
+    // 他のモディファイア (Super, Hyper, Meta, CapsLock, NumLock) は省略
 
+    // crossterm の KeyCode から X11 の keysym を決定
     let keysym = match key_event.code {
-        KeyCode::Char(c) => c as u32,
+        // 文字キー: crossterm は Shift を考慮した文字を返すことが多い
+        KeyCode::Char(c) => match c {
+            ' ' => keysyms::XK_space,
+            '!' => keysyms::XK_exclam,
+            '"' => keysyms::XK_quotedbl,
+            '#' => keysyms::XK_numbersign,
+            '$' => keysyms::XK_dollar,
+            '%' => keysyms::XK_percent,
+            '&' => keysyms::XK_ampersand,
+            '\'' => keysyms::XK_apostrophe,
+            '(' => keysyms::XK_parenleft,
+            ')' => keysyms::XK_parenright,
+            '*' => keysyms::XK_asterisk,
+            '+' => keysyms::XK_plus,
+            ',' => keysyms::XK_comma,
+            '-' => keysyms::XK_minus,
+            '.' => keysyms::XK_period,
+            '/' => keysyms::XK_slash,
+            '0'..='9' => keysyms::XK_0 + (c as u32 - '0' as u32),
+            ':' => keysyms::XK_colon,
+            ';' => keysyms::XK_semicolon,
+            '<' => keysyms::XK_less,
+            '=' => keysyms::XK_equal,
+            '>' => keysyms::XK_greater,
+            '?' => keysyms::XK_question,
+            '@' => keysyms::XK_at,
+            'A'..='Z' => keysyms::XK_A + (c as u32 - 'A' as u32),
+            '[' => keysyms::XK_bracketleft,
+            '\\' => keysyms::XK_backslash,
+            ']' => keysyms::XK_bracketright,
+            '^' => keysyms::XK_asciicircum,
+            '_' => keysyms::XK_underscore,
+            '`' => keysyms::XK_grave,
+            'a'..='z' => keysyms::XK_a + (c as u32 - 'a' as u32),
+            '{' => keysyms::XK_braceleft,
+            '|' => keysyms::XK_bar,
+            '}' => keysyms::XK_braceright,
+            '~' => keysyms::XK_asciitilde,
+            // 上記以外 (非ASCII文字など) はそのまま Unicode コードポイントを使う
+            // Fcitx がこれを解釈できるかは Fcitx 側の実装による
+            _ => c as u32,
+        },
+        // 特殊キー
         KeyCode::Backspace => keysyms::XK_BackSpace,
         KeyCode::Enter => keysyms::XK_Return,
         KeyCode::Left => keysyms::XK_Left,
@@ -65,9 +151,13 @@ fn map_key_event_to_fcitx(key_event: &KeyEvent) -> Option<(u32, u32, u32)> {
         KeyCode::Tab => keysyms::XK_Tab,
         KeyCode::Delete => keysyms::XK_Delete,
         KeyCode::Esc => keysyms::XK_Escape,
-        _ => return None,
+        // 他のキー (Home, End, Insert, F1-F12 etc.) は必要なら追加
+        _ => return None, // マッピングできないキーは無視
     };
+
+    // keycode は 0 (プレースホルダー)
     let keycode = 0;
+
     Some((keysym, keycode, state))
 }
 
